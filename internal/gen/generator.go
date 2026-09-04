@@ -453,6 +453,12 @@ func (f Field) Type() string {
 		return fmt.Sprintf("field.Number[%s]", goType)
 	}
 
+	// A serialized field is one column whatever its Go type, so it must not be treated as an
+	// association just because that type is a struct or a slice.
+	if hasSerializerTag(f.Tag) {
+		return fmt.Sprintf("field.Field[%s]", shortTypeName(goType))
+	}
+
 	if typ := loadNamedType(f.file.goModDir, f.file.getFullImportPath(pkgName), typName); typ != nil {
 		if ImplementsAllowedInterfaces(typ) { // For interface-implementing types, use generic Field
 			return fmt.Sprintf("field.Field[%s]", filepath.Base(goType))
