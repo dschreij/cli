@@ -457,6 +457,11 @@ func (f Field) Type() string {
 		if ImplementsAllowedInterfaces(typ) { // For interface-implementing types, use generic Field
 			return fmt.Sprintf("field.Field[%s]", filepath.Base(goType))
 		}
+		// A named type over a basic kind (an enum, a duration, a flag) is a scalar column and
+		// gets the helper of its kind instead of being mistaken for an association.
+		if helper, ok := scalarHelperForNamedType(typ, filepath.Base(goType)); ok {
+			return helper
+		}
 	}
 
 	// Check if this is a relation field based on its type

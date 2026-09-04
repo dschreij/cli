@@ -149,6 +149,40 @@ func loadNamedStructType(modRoot, pkgPath, name string) (*ast.StructType, error)
 	return nil, fmt.Errorf("struct %s not found in package %s", name, pkgPath)
 }
 
+// scalarHelperForNamedType returns the field helper for a named type whose underlying type is a
+// basic kind or a byte slice. Enums over integers, durations, flags, string aliases and raw byte
+// payloads hold that kind in one column, so they get the helper of the kind rather than an
+// association helper.
+func scalarHelperForNamedType(typ types.Type, shortName string) (string, bool) {
+	named, ok := typ.(*types.Named)
+	if !ok {
+		return "", false
+	}
+	var basic *types.Basic
+	switch under := named.Underlying().(type) {
+	case *types.Basic:
+		basic = under
+	case *types.Slice:
+		// A named byte slice (json.RawMessage, for one) is a blob column.
+		if elem, ok := under.Elem().(*types.Basic); ok && elem.Kind() == types.Byte {
+			return "field.Bytes", true
+		}
+		return "", false
+	default:
+		return "", false
+	}
+
+	switch info := basic.Info(); {
+	case info&types.IsBoolean != 0:
+		return "field.Bool", true
+	case info&types.IsString != 0:
+		return "field.String", true
+	case info&types.IsInteger != 0, info&types.IsFloat != 0:
+		return fmt.Sprintf("field.Number[%s]", shortName), true
+	}
+	return "", false
+}
+
 // generateDBName generates database column name using GORM's NamingStrategy and COLUMN tag.
 func generateDBName(fieldName, gormTag string) string {
 	tagSettings := schema.ParseTagSetting(reflect.StructTag(gormTag).Get("gorm"), ";")
