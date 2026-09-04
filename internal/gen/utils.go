@@ -10,10 +10,12 @@ import (
 	"go/types"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/tools/go/packages"
 	_ "gorm.io/gorm"
@@ -111,8 +113,46 @@ func loadNamedType(modRoot, pkgPath, name string) types.Type {
 	return nil
 }
 
-// loadStructFromPackage loads a struct type definition from an external package by name
-func loadNamedStructType(modRoot, pkgPath, name string) (*ast.StructType, error) {
+type loadedStruct struct {
+	st      *ast.StructType
+	imports []Import
+	err     error
+}
+
+var (
+	loadedStructs   = map[string]loadedStruct{}
+	loadedStructsMu sync.Mutex
+)
+
+// loadNamedStructType loads a struct type declaration by name from a package, together with the
+// imports of the file declaring it, so callers can resolve the aliases its field types use.
+//
+// Memoised per module root, package and name: one base struct is commonly embedded by every model
+// in a package, and each embedding would otherwise load the package again, which shells out to the
+// go command.
+func loadNamedStructType(modRoot, pkgPath, name string) (*ast.StructType, []Import, error) {
+	key := modRoot + "\x00" + pkgPath + "\x00" + name
+
+	// The lock guards the map, never the load: holding it across a load would serialise every
+	// caller behind one shell-out to the go command. Two callers racing on the same key both
+	// load, which costs one redundant load and no correctness.
+	loadedStructsMu.Lock()
+	cached, ok := loadedStructs[key]
+	loadedStructsMu.Unlock()
+	if ok {
+		return cached.st, cached.imports, cached.err
+	}
+
+	st, imports, err := loadNamedStructTypeUncached(modRoot, pkgPath, name)
+
+	loadedStructsMu.Lock()
+	loadedStructs[key] = loadedStruct{st: st, imports: imports, err: err}
+	loadedStructsMu.Unlock()
+
+	return st, imports, err
+}
+
+func loadNamedStructTypeUncached(modRoot, pkgPath, name string) (*ast.StructType, []Import, error) {
 	cfg := &packages.Config{
 		Mode: packages.NeedSyntax | packages.NeedFiles | packages.NeedCompiledGoFiles | packages.NeedName,
 		Dir:  modRoot,
@@ -120,11 +160,11 @@ func loadNamedStructType(modRoot, pkgPath, name string) (*ast.StructType, error)
 
 	pkgs, err := packages.Load(cfg, pkgPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load package %q from %v: %w", pkgPath, modRoot, err)
+		return nil, nil, fmt.Errorf("failed to load package %q from %v: %w", pkgPath, modRoot, err)
 	}
 
 	if len(pkgs) == 0 {
-		return nil, fmt.Errorf("no packages found for path %q from %v", pkgPath, modRoot)
+		return nil, nil, fmt.Errorf("no packages found for path %q from %v", pkgPath, modRoot)
 	}
 
 	for _, pkg := range pkgs {
@@ -138,7 +178,7 @@ func loadNamedStructType(modRoot, pkgPath, name string) (*ast.StructType, error)
 					ts, ok := spec.(*ast.TypeSpec)
 					if ok && ts.Name.Name == name {
 						if st, ok := ts.Type.(*ast.StructType); ok {
-							return st, nil
+							return st, fileImports(syntax), nil
 						}
 					}
 				}
@@ -146,7 +186,26 @@ func loadNamedStructType(modRoot, pkgPath, name string) (*ast.StructType, error)
 		}
 	}
 
-	return nil, fmt.Errorf("struct %s not found in package %s", name, pkgPath)
+	return nil, nil, fmt.Errorf("struct %s not found in package %s", name, pkgPath)
+}
+
+// newImport builds an Import from a spec, keeping an explicit alias when there is one.
+func newImport(spec *ast.ImportSpec) Import {
+	importPath, _ := strconv.Unquote(spec.Path.Value)
+	name := path.Base(importPath)
+	if spec.Name != nil {
+		name = spec.Name.Name
+	}
+	return Import{Name: name, Path: importPath}
+}
+
+// fileImports returns the imports declared by a parsed file.
+func fileImports(f *ast.File) []Import {
+	imports := make([]Import, 0, len(f.Imports))
+	for _, spec := range f.Imports {
+		imports = append(imports, newImport(spec))
+	}
+	return imports
 }
 
 // generateDBName generates database column name using GORM's NamingStrategy and COLUMN tag.

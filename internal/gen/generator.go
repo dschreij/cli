@@ -488,16 +488,7 @@ func (f Field) Value() string {
 func (p *File) Visit(n ast.Node) (w ast.Visitor) {
 	switch n := n.(type) {
 	case *ast.ImportSpec:
-		importPath, _ := strconv.Unquote(n.Path.Value)
-		importName := path.Base(importPath)
-		if n.Name != nil {
-			importName = n.Name.Name
-		}
-
-		p.Imports = append(p.Imports, Import{
-			Name: importName,
-			Path: importPath,
-		})
+		p.Imports = append(p.Imports, newImport(n))
 	case *ast.GenDecl:
 		if n.Tok == token.VAR {
 			for _, spec := range n.Specs {
@@ -780,19 +771,24 @@ func (p *File) getFullImportPath(shortName string) string {
 // handleAnonymousEmbedding processes anonymous embedded fields and returns true if handled
 func (p *File) handleAnonymousEmbedding(field *ast.Field, pkgName string, s *Struct) bool {
 	// Helper function to add fields from embedded struct
-	addEmbeddedFields := func(structType *ast.StructType, typeName, embeddedPkgName string) bool {
-		sub := p.processStructType(&ast.TypeSpec{Name: &ast.Ident{Name: typeName}}, structType, embeddedPkgName)
+	addEmbeddedFields := func(from *File, structType *ast.StructType, typeName, embeddedPkgName string) bool {
+		sub := from.processStructType(&ast.TypeSpec{Name: &ast.Ident{Name: typeName}}, structType, embeddedPkgName)
 		s.Fields = append(s.Fields, sub.Fields...)
 		return true
 	}
 
-	// Helper function to load and process external struct type
+	// Helper function to load and process a struct type declared in another file or package
 	loadAndProcessExternalStruct := func(pkgName, typeName string) bool {
-		st, err := loadNamedStructType(p.goModDir, p.getFullImportPath(pkgName), typeName)
+		st, imports, err := loadNamedStructType(p.goModDir, p.getFullImportPath(pkgName), typeName)
 		if err != nil || st == nil {
 			return false
 		}
-		return addEmbeddedFields(st, typeName, pkgName)
+		// The embedded struct's field types are written in the aliases of the file declaring it,
+		// which this file need not share and may bind to another path. They resolve against that
+		// file's imports, on a copy, so neither file's aliases reach the other.
+		declaring := *p
+		declaring.Imports = append(append([]Import{}, imports...), p.Imports...)
+		return addEmbeddedFields(&declaring, st, typeName, pkgName)
 	}
 
 	// Unwrap pointer types to get the underlying type
@@ -807,9 +803,15 @@ func (p *File) handleAnonymousEmbedding(field *ast.Field, pkgName string, s *Str
 		if t.Obj != nil {
 			if ts, ok := t.Obj.Decl.(*ast.TypeSpec); ok {
 				if st, ok := ts.Type.(*ast.StructType); ok {
-					return addEmbeddedFields(st, t.Name, pkgName)
+					return addEmbeddedFields(p, st, t.Name, pkgName)
 				}
 			}
+			return false
+		}
+		// go/parser resolves identifiers within one file, so a type declared in another file of
+		// the same package has no Obj; load the package to find its declaration.
+		if p.PackagePath != "" {
+			return loadAndProcessExternalStruct(p.Package, t.Name)
 		}
 
 	case *ast.SelectorExpr:
@@ -820,7 +822,7 @@ func (p *File) handleAnonymousEmbedding(field *ast.Field, pkgName string, s *Str
 
 	case *ast.StructType:
 		// Anonymous inline struct embedding (e.g., struct{...})
-		return addEmbeddedFields(t, "AnonymousStruct", pkgName)
+		return addEmbeddedFields(p, t, "AnonymousStruct", pkgName)
 	}
 
 	return false
