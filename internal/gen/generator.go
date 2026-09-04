@@ -677,6 +677,11 @@ func (p *File) processStructType(typeSpec *ast.TypeSpec, data *ast.StructType, p
 					fieldTag, _ = strconv.Unquote(field.Tag.Value)
 				}
 
+				// GORM maps no column for these, so a helper would reference nothing.
+				if isIgnoredByGORM(fieldTag) {
+					continue
+				}
+
 				s.Fields = append(s.Fields, Field{
 					Name:        n.Name,
 					DBName:      generateDBName(n.Name, fieldTag),

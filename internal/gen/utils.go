@@ -149,6 +149,18 @@ func loadNamedStructType(modRoot, pkgPath, name string) (*ast.StructType, error)
 	return nil, fmt.Errorf("struct %s not found in package %s", name, pkgPath)
 }
 
+// isIgnoredByGORM reports whether the gorm tag removes the field from the schema. "-" and
+// "-:all" map no column; "-:migration" only skips migrations and still maps one.
+func isIgnoredByGORM(fieldTag string) bool {
+	settings := schema.ParseTagSetting(reflect.StructTag(fieldTag).Get("gorm"), ";")
+	v, ok := settings["-"]
+	if !ok {
+		return false
+	}
+	v = strings.ToLower(strings.TrimSpace(v))
+	return v == "-" || v == "all"
+}
+
 // generateDBName generates database column name using GORM's NamingStrategy and COLUMN tag.
 func generateDBName(fieldName, gormTag string) string {
 	tagSettings := schema.ParseTagSetting(reflect.StructTag(gormTag).Get("gorm"), ";")
