@@ -175,9 +175,11 @@ func mergeImports(dst *[]Import, src []Import) {
 	}
 }
 
-// shouldSkipFile checks if a file contains the generated code header and should be skipped
+// shouldSkipFile reports whether a file is not an input for generation: anything that is not Go
+// source, test files (their types exist for tests only and would leak helpers into the output),
+// and files the generator wrote itself.
 func shouldSkipFile(filePath string) bool {
-	if !strings.HasSuffix(filePath, ".go") {
+	if !strings.HasSuffix(filePath, ".go") || strings.HasSuffix(filePath, "_test.go") {
 		return true
 	}
 

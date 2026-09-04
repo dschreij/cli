@@ -233,7 +233,7 @@ func (g *Generator) processFile(inputFile, inputRoot string) error {
 	}
 
 	if shouldSkipFile(inputFile) {
-		fmt.Printf("Skipping generated file: %s\n", inputFile)
+		fmt.Printf("Skipping file: %s\n", inputFile)
 		return nil
 	}
 
