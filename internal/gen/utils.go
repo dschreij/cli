@@ -10,6 +10,7 @@ import (
 	"go/types"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -147,6 +148,50 @@ func loadNamedStructType(modRoot, pkgPath, name string) (*ast.StructType, error)
 	}
 
 	return nil, fmt.Errorf("struct %s not found in package %s", name, pkgPath)
+}
+
+// hasSerializerTag reports whether the gorm tag declares a serializer, which makes the field a
+// single serialized column regardless of its Go type.
+func hasSerializerTag(fieldTag string) bool {
+	settings := schema.ParseTagSetting(reflect.StructTag(fieldTag).Get("gorm"), ";")
+	_, ok := settings["SERIALIZER"]
+	return ok
+}
+
+// shortTypeName strips import paths from a type expression while keeping its shape:
+// "[]*example.com/pkg.T" becomes "[]*pkg.T", where path.Base alone would drop the prefix.
+func shortTypeName(goType string) string {
+	switch {
+	case strings.HasPrefix(goType, "[]"):
+		return "[]" + shortTypeName(goType[2:])
+	case strings.HasPrefix(goType, "*"):
+		return "*" + shortTypeName(goType[1:])
+	case strings.HasPrefix(goType, "map["):
+		if end := closingBracket(goType, 3); end > 0 {
+			return "map[" + shortTypeName(goType[4:end]) + "]" + shortTypeName(goType[end+1:])
+		}
+	}
+	if open := strings.Index(goType, "["); open > 0 && strings.HasSuffix(goType, "]") {
+		return path.Base(goType[:open]) + "[" + shortTypeName(goType[open+1:len(goType)-1]) + "]"
+	}
+	return path.Base(goType)
+}
+
+// closingBracket returns the index of the bracket closing the one at open, or -1.
+func closingBracket(s string, open int) int {
+	depth := 0
+	for i := open; i < len(s); i++ {
+		switch s[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // generateDBName generates database column name using GORM's NamingStrategy and COLUMN tag.
