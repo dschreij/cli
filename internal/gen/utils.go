@@ -65,6 +65,7 @@ func ImplementsAllowedInterfaces(typ types.Type) bool {
 	if ptr, ok := typ.(*types.Pointer); ok {
 		typ = ptr.Elem()
 	}
+	typ = instantiateGeneric(typ)
 	for _, t := range allowedInterfaces {
 		iface, _ := t.Underlying().(*types.Interface)
 		if types.Implements(typ, iface) || types.Implements(types.NewPointer(typ), iface) {
@@ -72,6 +73,27 @@ func ImplementsAllowedInterfaces(typ types.Type) bool {
 		}
 	}
 	return false
+}
+
+// instantiateGeneric instantiates a generic named type with any for each of its type
+// parameters, so that its method set can be asked about: types.Implements is unspecified for
+// an uninstantiated generic type. The constraints are not checked, because the question is
+// which methods the type has, and Value and Scan do not mention the type parameters. A type
+// that is not generic, or is already instantiated, is returned as it is.
+func instantiateGeneric(typ types.Type) types.Type {
+	named, ok := typ.(*types.Named)
+	if !ok || named.TypeParams().Len() == 0 || named.TypeArgs().Len() > 0 {
+		return typ
+	}
+	args := make([]types.Type, named.TypeParams().Len())
+	for i := range args {
+		args[i] = types.Universe.Lookup("any").Type()
+	}
+	instance, err := types.Instantiate(nil, named, args, false)
+	if err != nil {
+		return typ
+	}
+	return instance
 }
 
 func findGoModDir(filename string) string {
@@ -158,6 +180,16 @@ func hasSerializerTag(fieldTag string) bool {
 	return ok
 }
 
+// isNamedTypeCandidate reports whether a type expression could name a type a package scope
+// holds, so that a container does not cost a package load to find nothing.
+func isNamedTypeCandidate(goType, typName string) bool {
+	if typName == "" || typName == "map" {
+		return false
+	}
+
+	return !strings.HasPrefix(goType, "[]") && !strings.HasPrefix(goType, "map[")
+}
+
 // shortTypeName strips import paths from a type expression while keeping its shape:
 // "[]*example.com/pkg.T" becomes "[]*pkg.T", where path.Base alone would drop the prefix.
 func shortTypeName(goType string) string {
@@ -172,9 +204,37 @@ func shortTypeName(goType string) string {
 		}
 	}
 	if open := strings.Index(goType, "["); open > 0 && strings.HasSuffix(goType, "]") {
-		return path.Base(goType[:open]) + "[" + shortTypeName(goType[open+1:len(goType)-1]) + "]"
+		args := splitTypeArgs(goType[open+1 : len(goType)-1])
+		for i, arg := range args {
+			args[i] = shortTypeName(arg)
+		}
+		return path.Base(goType[:open]) + "[" + strings.Join(args, ", ") + "]"
 	}
 	return path.Base(goType)
+}
+
+// splitTypeArgs splits the arguments of a generic type at the commas of its own level, leaving
+// the commas of a nested Pair[K, V] alone.
+func splitTypeArgs(s string) []string {
+	var (
+		args  []string
+		depth int
+		start int
+	)
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+		case ',':
+			if depth == 0 {
+				args = append(args, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	return append(args, strings.TrimSpace(s[start:]))
 }
 
 // closingBracket returns the index of the bracket closing the one at open, or -1.

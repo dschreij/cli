@@ -434,14 +434,18 @@ func (f Field) Type() string {
 
 	// Check if type implements allowed interfaces
 	var (
-		goType  = strings.TrimPrefix(f.GoType, "*")
-		pkgIdx  = strings.LastIndex(goType, ".")
-		pkgName = f.file.Package
-		typName = goType
+		goType = strings.TrimPrefix(f.GoType, "*")
+		// The package and type names come from the part before any type arguments: the last
+		// dot of Box[example.com/sample.Plain] is inside the argument, and a generic type is
+		// declared under its bare name.
+		baseType, _, _ = strings.Cut(goType, "[")
+		pkgIdx         = strings.LastIndex(baseType, ".")
+		pkgName        = f.file.Package
+		typName        = baseType
 	)
 
 	if pkgIdx > 0 {
-		pkgName, typName = goType[:pkgIdx], goType[pkgIdx+1:]
+		pkgName, typName = baseType[:pkgIdx], baseType[pkgIdx+1:]
 	}
 
 	// Handle regular field types
@@ -459,21 +463,33 @@ func (f Field) Type() string {
 		return fmt.Sprintf("field.Field[%s]", shortTypeName(goType))
 	}
 
-	if typ := loadNamedType(f.file.goModDir, f.file.getFullImportPath(pkgName), typName); typ != nil {
-		if ImplementsAllowedInterfaces(typ) { // For interface-implementing types, use generic Field
-			return fmt.Sprintf("field.Field[%s]", filepath.Base(goType))
+	// Only a plausible named type is worth loading a package for. A container has none to find:
+	// "[]T" leaves an empty base name and "map[K]V" leaves "map", and the lookup would shell out
+	// to the go command for a package it then finds nothing in. A named slice or map still
+	// reaches this, its name being its own.
+	if isNamedTypeCandidate(goType, typName) {
+		if typ := loadNamedType(f.file.goModDir, f.file.getFullImportPath(pkgName), typName); typ != nil {
+			if ImplementsAllowedInterfaces(typ) { // For interface-implementing types, use generic Field
+				return fmt.Sprintf("field.Field[%s]", shortTypeName(goType))
+			}
 		}
 	}
 
 	// Check if this is a relation field based on its type
 	if strings.HasPrefix(goType, "[]") {
-		elementType := filepath.Base(strings.TrimPrefix(goType, "[]"))
-		return fmt.Sprintf("field.Slice[%s]", elementType)
+		// The element keeps the shape of its own type arguments; a leading * is dropped, as it
+		// always was.
+		element := strings.TrimPrefix(strings.TrimPrefix(goType, "[]"), "*")
+		return fmt.Sprintf("field.Slice[%s]", shortTypeName(element))
+	} else if strings.HasPrefix(goType, "map[") {
+		// A map is one column whatever its key and value types. Now that the type printer renders
+		// it, a qualified element in it must not make the field read as an association.
+		return fmt.Sprintf("field.Field[%s]", shortTypeName(goType))
 	} else if strings.Contains(goType, ".") {
-		return fmt.Sprintf("field.Struct[%s]", filepath.Base(goType))
+		return fmt.Sprintf("field.Struct[%s]", shortTypeName(goType))
 	}
 
-	return fmt.Sprintf("field.Field[%s]", filepath.Base(goType))
+	return fmt.Sprintf("field.Field[%s]", shortTypeName(goType))
 }
 
 // Value returns the field value string with column name for template generation
@@ -752,6 +768,32 @@ func (p *File) parseFieldType(expr ast.Expr, pkgName string, fullMode bool) stri
 			return ""
 		}
 		return base + "[" + idx + "]"
+	case *ast.IndexListExpr:
+		// A generic type with more than one argument: Pair[K, V].
+		base := p.parseFieldType(t.X, pkgName, fullMode)
+		if base == "" {
+			return ""
+		}
+		args := make([]string, 0, len(t.Indices))
+		for _, index := range t.Indices {
+			arg := p.parseFieldType(index, pkgName, fullMode)
+			if arg == "" {
+				return ""
+			}
+			args = append(args, arg)
+		}
+		return base + "[" + strings.Join(args, ", ") + "]"
+	case *ast.MapType:
+		key := p.parseFieldType(t.Key, pkgName, fullMode)
+		value := p.parseFieldType(t.Value, pkgName, fullMode)
+		if key == "" || value == "" {
+			return ""
+		}
+		return "map[" + key + "]" + value
+	case *ast.InterfaceType:
+		if len(t.Methods.List) == 0 {
+			return "any"
+		}
 	case *ast.StarExpr:
 		innerType := p.parseFieldType(t.X, pkgName, fullMode)
 		return "*" + innerType

@@ -42,6 +42,8 @@ func TestShortTypeName(t *testing.T) {
 		{"map[example.com/a.K][]example.com/b.V", "map[a.K][]b.V"},
 		{"gorm.io/datatypes.JSONSlice[int]", "datatypes.JSONSlice[int]"},
 		{"gorm.io/datatypes.JSONType[example.com/pkg.T]", "datatypes.JSONType[pkg.T]"},
+		{"example.com/x.Pair[example.com/x.A, example.com/y.B]", "x.Pair[x.A, y.B]"},
+		{"example.com/x.Pair[map[string]example.com/x.A, example.com/x.Pair[int, string]]", "x.Pair[map[string]x.A, x.Pair[int, string]]"},
 	} {
 		if got := shortTypeName(tt.in); got != tt.want {
 			t.Errorf("shortTypeName(%q) = %q, want %q", tt.in, got, tt.want)
